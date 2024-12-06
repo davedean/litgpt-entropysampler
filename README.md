@@ -1,5 +1,9 @@
 <div align="center">
 
+# LitGPT - Entropy Sampler
+
+Experimenting with [Entropix](https://github.com/xjdr-alt/entropix/tree/main) inspired sampling.
+
 
 # ⚡ LitGPT
 
