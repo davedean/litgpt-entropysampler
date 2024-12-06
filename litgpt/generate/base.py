@@ -6,6 +6,8 @@ from pathlib import Path
 from pprint import pprint
 from typing import Any, Literal, Optional, Tuple, List, Union, Iterator
 import warnings
+import random
+
 
 import lightning as L
 import torch
@@ -50,17 +52,64 @@ def sample_top_p(logits: torch.Tensor, top_p: float) -> torch.Tensor:
     return logits
 
 
+def calculate_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate the entropy of the given logits.
+    
+    Args:
+    logits (torch.Tensor): Tensor of shape [batch_size, vocab_size]
+    
+    Returns:
+    torch.Tensor: Entropy values of shape [batch_size]
+    """
+    probs = torch.nn.functional.softmax(logits, dim=-1)
+    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+    return -torch.sum(probs * log_probs, dim=-1)
+
+def calculate_varentropy(logits: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate the varentropy (variance of entropy) of the given logits.
+    
+    Args:
+    logits (torch.Tensor): Tensor of shape [batch_size, vocab_size]
+    
+    Returns:
+    torch.Tensor: Varentropy values of shape [batch_size]
+    """
+    probs = torch.nn.functional.softmax(logits, dim=-1)
+    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+    entropy = -torch.sum(probs * log_probs, dim=-1, keepdim=True)
+    return torch.sum(probs * (log_probs + entropy) ** 2, dim=-1)
+
+
+
+
 def sample(
-    logits: torch.Tensor, temperature: float = 1.0, top_k: Optional[int] = None, top_p: float = 1.0
+    logits: torch.Tensor,
+    temperature: float = 1.0,
+    top_k: Optional[int] = None,
+    top_p: float = 1.0,
+    # low_probability_tokens: Optional[List[int]] = [11748, 11748],
+    low_probability_tokens: Optional[int] = 83461, # is 9 \n's in a row.
+    low_probability_threshold: float = 0.7
 ) -> torch.Tensor:
     if top_p < 0.0 or top_p > 1.0:
         raise ValueError(f"top_p must be in [0, 1], got {top_p}")
+    if low_probability_threshold < 0.0 or low_probability_threshold > 1.0:
+        raise ValueError(f"low_probability_threshold must be in [0, 1], got {low_probability_threshold}")
+    
     logits = logits[0, -1]
+    
+    # Calculate entropy and varentropy
+    entropies = calculate_entropy(logits)
+    varentropies = calculate_varentropy(logits)
+
+
     # optionally crop the logits to only the top k options
     if top_k is not None:
         v, i = torch.topk(logits, min(top_k, logits.size(-1)))
-        # do not use `torch.where` as in nanogpt because it will repeat top-k collisions
         logits = torch.full_like(logits, float("-inf")).scatter_(-1, i, v)
+    
     # optionally scale the logits and sample from a probability distribution
     if temperature > 0.0 or top_p > 0.0:
         if temperature > 0.0:
@@ -69,7 +118,26 @@ def sample(
         if top_p < 1.0:
             logits = sample_top_p(logits, top_p)
         probs = torch.nn.functional.softmax(logits, dim=-1)
+
+        # DD EDITS:  
+        # Check if the highest probability is below the threshold
+        if low_probability_tokens is not None and torch.max(probs) < low_probability_threshold:
+            device = logits.device
+            return torch.tensor([low_probability_tokens], dtype=torch.int64, device=device)
+            #return multinomial_num_samples_1([low_probability_token])
+
+        
         return multinomial_num_samples_1(probs)
+    
+    # Check if the highest probability is below the threshold
+    if low_probability_tokens is not None:
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+        if torch.max(probs) < low_probability_threshold:
+            device = logits.device
+            return torch.tensor([low_probability_tokens], dtype=torch.int64, device=device)
+            #return torch.tensor([low_probability_token], dtype=torch.long)
+            #return multinomial_num_samples_1([low_probability_token])
+    
     return torch.argmax(logits, dim=-1, keepdim=True)
 
 
@@ -112,6 +180,12 @@ def batched_next_token(model: GPT, input_pos: torch.Tensor, x: torch.Tensor, kwa
 
     # Return the next token for each sample in the batch.
     return batched_sample(logits_list, kwargs=_kwargs)
+
+
+def get_random_item(my_list):
+    if not my_list:
+        return None
+    return random.choice(my_list)
 
 
 @torch.inference_mode()
@@ -158,6 +232,15 @@ def generate_fn(
     stop_progress = [0] * len(stop_tokens)
     yielded_idx = 0
 
+    # DD 
+    low_probability_threshold_constant = 0.8
+    low_probability_threshold = low_probability_threshold_constant
+    low_probability_backoff_constant = 40
+    low_probability_backoff = low_probability_backoff_constant
+    low_probability_temp = 1
+    normal_probability_temp = 0.01
+
+
     # Generate output tokens.
     # The first token generated is the prefill token.
     # The input_pos for this token is the width of the entire prompt.
@@ -168,10 +251,50 @@ def generate_fn(
     input_pos = torch.arange(0, prompt_size, device=device, dtype=torch.int64)
     for current_idx in range(max_returned_tokens - prompt_size):
 
+        if low_probability_backoff > 0:
+            # print("lowering backoff")
+            low_probability_backoff = low_probability_backoff - 1 
+            temperature = low_probability_temp
+            low_probability_threshold = 0.0 # no chance of hitting a wait.. 
+        else:
+            # print("reset threshold")
+            low_probability_threshold = low_probability_threshold_constant
+            temperature = normal_probability_temp
+
         # Generate the token
-        token = next_token(model, input_pos, token.view(1, -1), temperature=temperature, top_k=top_k, top_p=top_p)
-        tokens.append(token)
-        int_token = token.item()
+        token = next_token(model, input_pos, token.view(1, -1), temperature=temperature, top_k=top_k, top_p=top_p,low_probability_threshold=low_probability_threshold)
+
+        # DD EDITS:
+        # #print("token:", token)
+        # for t in token:
+        #     #print(t)
+        #     tokens.append(t)
+        #     int_token = t.item()
+
+        if token.item() != 83461: # 9 \n's in a row .. 
+            tokens.append(token)
+            int_token = token.item()
+        else:
+            #tokenizer.encode(prompt, device=fabric.device)
+            # [low_probability_tokens], dtype=torch.int64, device=device
+
+            cot_phrases = [
+            # wait .. I need to think step by step. 
+            [ 220, 11748, 1131, 358, 1205, 311, 1781, 3094, 555, 3094, 13, 220, ], 
+
+            # "wait, let me start over - "
+            [220, 2201, 11, 3868, 11, 1095, 757, 1212, 927, 482, 220, ],
+
+            # hmm, I'm confused. I need to think clearly and think step by step.
+            [ 220, 71, 3906, 11, 358, 2846, 22568, 13, 358, 1205, 311, 1781, 9539, 323, 1781, 3094, 555, 3094, 13, ],
+
+            ]
+
+            cot_phrase = get_random_item(cot_phrases)
+
+            tokens.append(torch.tensor(cot_phrase, dtype=torch.int64, device=device)) # add a CoT phrase
+            low_probability_backoff = low_probability_backoff_constant # set the backoff
+            int_token = 220 # set the last token to a space.
 
         # Check for stop sequences
         # For each stop sequence, we keep a running total of how many are matched in stop_progress.
@@ -401,7 +524,7 @@ def main(
     prompt: str = "What food do llamas eat?",
     *,
     num_samples: int = 1,
-    max_new_tokens: int = 50,
+    max_new_tokens: int = 5000,
     top_k: Optional[int] = 50,
     top_p: float = 1.0,
     temperature: float = 0.8,

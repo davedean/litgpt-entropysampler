@@ -131,6 +131,11 @@ def interact(multiline, model, tokenizer, prompt_style, fabric, temperature, max
         except KeyboardInterrupt:
             break
 
+
+        # DD EDIT
+        if prompt != "" :
+            prompt = "remember to think step by step to answer the users question. You'll provide your reasoning, and if you get confused you will start over, summarize what you know so far, and then continue. Remember to think clearly and explain as you go. The user prompt is: " + prompt
+            
         prompt = prompt.lower().strip()
         if not prompt or prompt in ("!quit", "!exit"):
             break
@@ -142,7 +147,7 @@ def interact(multiline, model, tokenizer, prompt_style, fabric, temperature, max
 def main(
     checkpoint_dir: Path,
     *,
-    max_new_tokens: int = 50,
+    max_new_tokens: int = 5000,
     top_k: Optional[int] = 50,
     top_p: float = 1.0,
     temperature: float = 0.8,

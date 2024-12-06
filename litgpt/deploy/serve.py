@@ -27,7 +27,7 @@ class BaseLitAPI(LitAPI):
         temperature: float = 0.8,
         top_k: int = 50,
         top_p: float = 1.0,
-        max_new_tokens: int = 50,
+        max_new_tokens: int = 5000,
         devices: int = 1
     ) -> None:
 
@@ -82,7 +82,7 @@ class SimpleLitAPI(BaseLitAPI):
         temperature: float = 0.8,
         top_k: int = 50,
         top_p: float = 1.0,
-        max_new_tokens: int = 50,
+        max_new_tokens: int = 5000,
         devices: int = 1
     ):
         super().__init__(checkpoint_dir, quantize, precision, temperature, top_k, top_p, max_new_tokens, devices)   
@@ -114,7 +114,7 @@ class StreamLitAPI(BaseLitAPI):
         temperature: float = 0.8,
         top_k: int = 50,
         top_p: float = 1.0,
-        max_new_tokens: int = 50,
+        max_new_tokens: int = 5000,
         devices: int = 1
     ):
         super().__init__(checkpoint_dir, quantize, precision, temperature, top_k, top_p, max_new_tokens, devices)   
@@ -145,7 +145,7 @@ def run_server(
     temperature: float = 0.8,
     top_k: int = 50,
     top_p: float = 1.0,
-    max_new_tokens: int = 50,
+    max_new_tokens: int = 5000,
     devices: int = 1,
     accelerator: str = "auto",
     port: int = 8000,
