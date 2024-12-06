@@ -135,7 +135,7 @@ def interact(multiline, model, tokenizer, prompt_style, fabric, temperature, max
         # DD EDIT
         if prompt != "" :
             prompt = "remember to think step by step to answer the users question. You'll provide your reasoning, and if you get confused you will start over, summarize what you know so far, and then continue. Remember to think clearly and explain as you go. The user prompt is: " + prompt
-            
+
         prompt = prompt.lower().strip()
         if not prompt or prompt in ("!quit", "!exit"):
             break

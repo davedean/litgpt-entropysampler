@@ -106,7 +106,7 @@ def main(
     prompt: str = "What food do llamas eat?",
     *,
     num_samples: int = 1,
-    max_new_tokens: int = 5000,
+    max_new_tokens: int = 50,
     top_k: Optional[int] = 50,
     top_p: float = 1.0,
     temperature: float = 0.8,

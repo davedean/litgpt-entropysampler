@@ -7,6 +7,8 @@ from pprint import pprint
 from typing import Any, Literal, Optional, Tuple, List, Union, Iterator
 import warnings
 import random
+from random import randint
+
 
 
 import lightning as L
@@ -28,6 +30,9 @@ from litgpt.utils import (
     load_checkpoint
 )
 
+backoff_counter=40
+backoff_constant=40
+seed=1234
 
 def multinomial_num_samples_1(probs: torch.Tensor) -> torch.Tensor:
     if torch._dynamo.is_compiling():
@@ -53,6 +58,7 @@ def sample_top_p(logits: torch.Tensor, top_p: float) -> torch.Tensor:
 
 
 def calculate_entropy(logits: torch.Tensor) -> torch.Tensor:
+    
     """
     Calculate the entropy of the given logits.
     
@@ -62,9 +68,24 @@ def calculate_entropy(logits: torch.Tensor) -> torch.Tensor:
     Returns:
     torch.Tensor: Entropy values of shape [batch_size]
     """
-    probs = torch.nn.functional.softmax(logits, dim=-1)
-    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-    return -torch.sum(probs * log_probs, dim=-1)
+    # Add small epsilon to avoid log(0)
+    eps = 1e-10
+    
+    # Compute softmax with better numerical stability
+    max_logits = torch.max(logits, dim=-1, keepdim=True)[0]
+    logits_exp = torch.exp(logits - max_logits)
+    probs = logits_exp / torch.sum(logits_exp, dim=-1, keepdim=True)
+    
+    # Compute log probabilities
+    log_probs = torch.log(probs + eps)
+    
+    # Calculate entropy
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+
+    # Check for invalid values
+    entropy = torch.where(torch.isnan(entropy), torch.zeros_like(entropy), entropy)
+    # print("e: ", entropy)
+    return entropy
 
 def calculate_varentropy(logits: torch.Tensor) -> torch.Tensor:
     """
@@ -76,34 +97,117 @@ def calculate_varentropy(logits: torch.Tensor) -> torch.Tensor:
     Returns:
     torch.Tensor: Varentropy values of shape [batch_size]
     """
-    probs = torch.nn.functional.softmax(logits, dim=-1)
-    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+    # Add small epsilon to avoid log(0)
+    eps = 1e-10
+    
+    # Compute softmax with better numerical stability
+    max_logits = torch.max(logits, dim=-1, keepdim=True)[0]
+    logits_exp = torch.exp(logits - max_logits)
+    probs = logits_exp / torch.sum(logits_exp, dim=-1, keepdim=True)
+    
+    # Compute log probabilities
+    log_probs = torch.log(probs + eps)
+    
+    # Calculate entropy
     entropy = -torch.sum(probs * log_probs, dim=-1, keepdim=True)
-    return torch.sum(probs * (log_probs + entropy) ** 2, dim=-1)
+    
+    # Calculate varentropy
+    varentropy = torch.sum(probs * (log_probs + entropy) ** 2, dim=-1)
+    
+    # Check for invalid values
+    varentropy = torch.where(torch.isnan(varentropy), torch.zeros_like(varentropy), varentropy)
+    
+    # print("ve: ", varentropy)
+    return varentropy
 
 
 
 
 def sample(
     logits: torch.Tensor,
-    temperature: float = 1.0,
+    temperature: float = 0.8,
     top_k: Optional[int] = None,
     top_p: float = 1.0,
     # low_probability_tokens: Optional[List[int]] = [11748, 11748],
     low_probability_tokens: Optional[int] = 83461, # is 9 \n's in a row.
-    low_probability_threshold: float = 0.7
+    # low_probability_threshold: float = 0.7,
+    entropy_threshold: float = 0.4,
+    varentropy_threshold: float = 0.4
 ) -> torch.Tensor:
     if top_p < 0.0 or top_p > 1.0:
         raise ValueError(f"top_p must be in [0, 1], got {top_p}")
-    if low_probability_threshold < 0.0 or low_probability_threshold > 1.0:
-        raise ValueError(f"low_probability_threshold must be in [0, 1], got {low_probability_threshold}")
+    # if low_probability_threshold < 0.0 or low_probability_threshold > 1.0:
+    #     raise ValueError(f"low_probability_threshold must be in [0, 1], got {low_probability_threshold}")
     
+    global backoff_counter
+    global backoff_constant
+
     logits = logits[0, -1]
-    
+
     # Calculate entropy and varentropy
     entropies = calculate_entropy(logits)
     varentropies = calculate_varentropy(logits)
 
+    # print(entropies.item())
+    # print(varentropies)
+
+    class bcolors:
+        HEADER = '\033[95m'
+        OKBLUE = '\033[94m'
+        OKCYAN = '\033[96m'
+        OKGREEN = '\033[92m'
+        WARNING = '\033[93m'
+        FAIL = '\033[91m'
+        ENDC = '\033[0m'
+        BOLD = '\033[1m'
+        UNDERLINE = '\033[4m'
+
+    le = 1.1
+    lv = 1.2
+    he = 2.8
+    hv = 2.5
+
+    print(f"{bcolors.HEADER}",end='') # purple?
+
+    if entropies < le and varentropies < lv:
+        print(f"{bcolors.OKBLUE}",end='') # blue
+        # situation good! Go ahead! 
+        return torch.argmax(logits, dim=-1, keepdim=True)
+
+    #elif entropies < entropy_threshold and varentropies > varentropy_threshold:
+    elif entropies < le and varentropies > hv:
+        if backoff_counter==0:
+            print(f"{bcolors.OKGREEN}",end='') # green
+
+            # Model has divergent views; explore alternative paths.
+            # output "think again" tokens 
+            backoff_counter = backoff_constant # set this so we don't keep interrupting the model.
+            return torch.tensor([low_probability_tokens], dtype=torch.int64, device=logits.device)
+
+    elif entropies > he and varentropies > he:
+        print(f"{bcolors.WARNING}",end='') # yellow 
+
+        # Model is very uncertain; resample with adjusted parameters.
+        temperature=1.0
+        global seed 
+        seed = randint(0,9999)
+
+
+
+    elif entropies > he and varentropies < lv:
+        if backoff_counter < 20 :
+            print(f"{bcolors.FAIL}FFFFF",end='') # ???
+
+            # print("high,low")
+            # Model is uncertain but consistent; increase temperature.
+            
+            # bump it up baby
+            temperature = 1.0
+
+
+    # fall through to regular sampling .. 
+    if backoff_counter>0 :
+        backoff_counter = backoff_counter - 1  
 
     # optionally crop the logits to only the top k options
     if top_k is not None:
@@ -118,27 +222,13 @@ def sample(
         if top_p < 1.0:
             logits = sample_top_p(logits, top_p)
         probs = torch.nn.functional.softmax(logits, dim=-1)
-
-        # DD EDITS:  
-        # Check if the highest probability is below the threshold
-        if low_probability_tokens is not None and torch.max(probs) < low_probability_threshold:
-            device = logits.device
-            return torch.tensor([low_probability_tokens], dtype=torch.int64, device=device)
-            #return multinomial_num_samples_1([low_probability_token])
-
-        
         return multinomial_num_samples_1(probs)
-    
-    # Check if the highest probability is below the threshold
-    if low_probability_tokens is not None:
-        probs = torch.nn.functional.softmax(logits, dim=-1)
-        if torch.max(probs) < low_probability_threshold:
-            device = logits.device
-            return torch.tensor([low_probability_tokens], dtype=torch.int64, device=device)
-            #return torch.tensor([low_probability_token], dtype=torch.long)
-            #return multinomial_num_samples_1([low_probability_token])
-    
+
+      
+    print(f"{bcolors.BOLD}",end='') # ???
+
     return torch.argmax(logits, dim=-1, keepdim=True)
+    #return torch.argmax(logits, dim=-1, keepdim=True)
 
 
 def next_token(model: GPT, input_pos: torch.Tensor, x: torch.Tensor, **kwargs: Any) -> torch.Tensor:
@@ -194,7 +284,7 @@ def generate_fn(
     prompt: torch.Tensor,
     max_returned_tokens: int,
     *,
-    temperature: float = 1.0,
+    temperature: float = 0.8,
     top_k: Optional[int] = None,
     top_p: float = 1.0,
     stop_tokens: Tuple[List[int], ...] = (),
@@ -233,12 +323,12 @@ def generate_fn(
     yielded_idx = 0
 
     # DD 
-    low_probability_threshold_constant = 0.8
-    low_probability_threshold = low_probability_threshold_constant
-    low_probability_backoff_constant = 40
-    low_probability_backoff = low_probability_backoff_constant
-    low_probability_temp = 1
-    normal_probability_temp = 0.01
+    # low_probability_threshold_constant = 0.8
+    # low_probability_threshold = low_probability_threshold_constant
+    # low_probability_backoff_constant = 40
+    # low_probability_backoff = low_probability_backoff_constant
+    # low_probability_temp = 1
+    # normal_probability_temp = 0.01
 
 
     # Generate output tokens.
@@ -251,33 +341,16 @@ def generate_fn(
     input_pos = torch.arange(0, prompt_size, device=device, dtype=torch.int64)
     for current_idx in range(max_returned_tokens - prompt_size):
 
-        if low_probability_backoff > 0:
-            # print("lowering backoff")
-            low_probability_backoff = low_probability_backoff - 1 
-            temperature = low_probability_temp
-            low_probability_threshold = 0.0 # no chance of hitting a wait.. 
-        else:
-            # print("reset threshold")
-            low_probability_threshold = low_probability_threshold_constant
-            temperature = normal_probability_temp
-
         # Generate the token
-        token = next_token(model, input_pos, token.view(1, -1), temperature=temperature, top_k=top_k, top_p=top_p,low_probability_threshold=low_probability_threshold)
+        token = next_token(model, input_pos, token.view(1, -1), temperature=temperature, top_k=top_k, top_p=top_p)
 
-        # DD EDITS:
-        # #print("token:", token)
-        # for t in token:
-        #     #print(t)
-        #     tokens.append(t)
-        #     int_token = t.item()
+        # set this, because we will change it when we get a wait ... token 
+        token_len=1 
 
         if token.item() != 83461: # 9 \n's in a row .. 
             tokens.append(token)
             int_token = token.item()
         else:
-            #tokenizer.encode(prompt, device=fabric.device)
-            # [low_probability_tokens], dtype=torch.int64, device=device
-
             cot_phrases = [
             # wait .. I need to think step by step. 
             [ 220, 11748, 1131, 358, 1205, 311, 1781, 3094, 555, 3094, 13, 220, ], 
@@ -286,14 +359,14 @@ def generate_fn(
             [220, 2201, 11, 3868, 11, 1095, 757, 1212, 927, 482, 220, ],
 
             # hmm, I'm confused. I need to think clearly and think step by step.
-            [ 220, 71, 3906, 11, 358, 2846, 22568, 13, 358, 1205, 311, 1781, 9539, 323, 1781, 3094, 555, 3094, 13, ],
-
+            [ 220, 71, 3906, 11, 358, 2846, 22568, 13, 358, 1205, 311, 1781, 9539, 323, 1781, 3094, 555, 3094, 13, 220 ],
             ]
 
             cot_phrase = get_random_item(cot_phrases)
+            token_len = len(cot_phrase)
 
             tokens.append(torch.tensor(cot_phrase, dtype=torch.int64, device=device)) # add a CoT phrase
-            low_probability_backoff = low_probability_backoff_constant # set the backoff
+
             int_token = 220 # set the last token to a space.
 
         # Check for stop sequences
@@ -315,7 +388,7 @@ def generate_fn(
         if stop_tokens:
             safe_idx = len(tokens) - max(stop_progress)
         else:
-            safe_idx = current_idx + 1 # include the token just generated
+            safe_idx = current_idx + token_len # include the token just generated
 
         if yielded_idx < safe_idx:
             y_tokens = tokens[yielded_idx : safe_idx]
@@ -327,7 +400,7 @@ def generate_fn(
             prefill_token = False
             input_pos = torch.tensor([prompt_size], device=device, dtype=torch.int64)
         else:
-            input_pos.add_(1)
+            input_pos.add_(token_len) # add the cot_phrase len, or 1
 
     # Yield any remaining tokens
     if yielded_idx < len(tokens):
@@ -626,7 +699,8 @@ def main(
     load_checkpoint(fabric, model, checkpoint_path)
     fabric.print(f"Time to load the model weights: {time.perf_counter() - t0:.02f} seconds.", file=sys.stderr)
 
-    L.seed_everything(1234)
+    global seed
+    L.seed_everything(seed)
     for i in range(num_samples):
         t0 = time.perf_counter()
         y = generate(model, encoded, max_returned_tokens, temperature=temperature, top_k=top_k, top_p=top_p, eos_id=tokenizer.eos_id)

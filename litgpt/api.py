@@ -447,7 +447,7 @@ class LLM(torch.nn.Module):
     def generate(
         self,
         prompt: str,
-        max_new_tokens: int = 5000,
+        max_new_tokens: int = 50,
         temperature: float = 1.0,
         top_k: Optional[int] = None,
         top_p: float = 1.0,
