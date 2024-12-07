@@ -162,9 +162,9 @@ def sample(
         BOLD = '\033[1m'
         UNDERLINE = '\033[4m'
 
-    le = 1.1
+    le = 0.3
     lv = 1.2
-    he = 2.8
+    he = 2.5
     hv = 2.5
 
     print(f"{bcolors.HEADER}",end='') # purple?
