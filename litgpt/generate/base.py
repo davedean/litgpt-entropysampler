@@ -215,70 +215,40 @@ def sample(
     # set default text colour
     print(f"{bcolors.HEADER}",end='') # purple?
 
-    # Entropix style:
-    # if entropies < le and varentropies < lv:
-    #     print(f"{bcolors.OKBLUE}",end='') # blue
-    #     # situation good! Go ahead! 
-    #     return torch.argmax(logits, dim=-1, keepdim=True)
+    for i in range(5):
 
-    # #elif entropies < entropy_threshold and varentropies > varentropy_threshold:
-    # elif entropies < le and varentropies > hv:
-    #     if backoff_counter==0:
-    #         print(f"{bcolors.OKGREEN}",end='') # green
+        # optionally crop the logits to only the top k options
+        if top_k is not None:
+            v, i = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits = torch.full_like(logits, float("-inf")).scatter_(-1, i, v)
+        
+        # optionally scale the logits and sample from a probability distribution
+        if temperature > 0.0 or top_p > 0.0:
+            if temperature > 0.0:
+                logits = logits / temperature
+            # optionally crop the logits to smallest set of logits with a cumulative probability above top_p
+            if top_p < 1.0:
+                logits = sample_top_p(logits, top_p)
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+            next_token = multinomial_num_samples_1(probs)
 
-    #         # Model has divergent views; explore alternative paths.
-    #         # output "think again" tokens 
-    #         backoff_counter = backoff_constant # set this so we don't keep interrupting the model.
-    #         return torch.tensor([low_probability_tokens], dtype=torch.int64, device=logits.device)
+        next_token = torch.argmax(logits, dim=-1, keepdim=True)
 
-    # elif entropies > he and varentropies > he:
-    #     print(f"{bcolors.WARNING}",end='') # yellow 
+        # Calculate entropy and varentropy before sampling
+        e_post = calculate_entropy(logits)
+        ve_post = calculate_varentropy(logits)
 
-    #     # Model is very uncertain; resample with adjusted parameters.
-    #     temperature=1.0
-    #     global seed 
-    #     seed = randint(0,9999)
+        if e_post < e_pre and ve_post<ve_pre:
+            return next_token
+        else:
+            print(f"{bcolors.OKBLUE}",end='') # blue
+            temperature = 1 
+            top_p = 0.3
+            top_k = 50
 
+    # if we fail to get something better, return what we have
+    return next_token
 
-
-    # elif entropies > he and varentropies < lv:
-    #     if backoff_counter < 20 :
-    #         print(f"{bcolors.FAIL}FFFFF",end='') # ???
-
-    #         # print("high,low")
-    #         # Model is uncertain but consistent; increase temperature.
-            
-    #         # bump it up baby
-    #         temperature = 1.0
-
-    # optionally crop the logits to only the top k options
-    if top_k is not None:
-        v, i = torch.topk(logits, min(top_k, logits.size(-1)))
-        logits = torch.full_like(logits, float("-inf")).scatter_(-1, i, v)
-    
-    # optionally scale the logits and sample from a probability distribution
-    if temperature > 0.0 or top_p > 0.0:
-        if temperature > 0.0:
-            logits = logits / temperature
-        # optionally crop the logits to smallest set of logits with a cumulative probability above top_p
-        if top_p < 1.0:
-            logits = sample_top_p(logits, top_p)
-        probs = torch.nn.functional.softmax(logits, dim=-1)
-        next_token = multinomial_num_samples_1(probs)
-
-    next_token = torch.argmax(logits, dim=-1, keepdim=True)
-
-    # Calculate entropy and varentropy before sampling
-    e_post = calculate_entropy(logits)
-    ve_post = calculate_varentropy(logits)
-
-    if e_post < e_pre and ve_post<ve_pre:
-        return next_token
-    else:
-        print(f"{bcolors.OKBLUE}",end='') # blue
-        temperature = 1 
-        top_p = 0.3
-        top_k = 50
         
 
 
