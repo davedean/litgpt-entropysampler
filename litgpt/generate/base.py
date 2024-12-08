@@ -8,8 +8,11 @@ from typing import Any, Literal, Optional, Tuple, List, Union, Iterator
 import warnings
 import random
 from random import randint
+import datetime
+import os
+import json
 
-
+import math
 
 import lightning as L
 import torch
@@ -32,20 +35,76 @@ from litgpt.utils import (
 
 
 ## DD Consts / Vars (yeah yeah yeah, bad) 
-# backoff_counter=40
-# backoff_constant=40
+backoff_constant=20
+backoff_counter=backoff_constant
+
+greedy_constant=20
+greedy_counter=greedy_constant
 # seed=1234
 
 class bcolors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
+    # Reset
+    RESET = '\033[0m'
+
+    # Regular Colors
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+
+    # Bold Colors
+    BLACK_BOLD = '\033[1;30m'
+    RED_BOLD = '\033[1;31m'
+    GREEN_BOLD = '\033[1;32m'
+    YELLOW_BOLD = '\033[1;33m'
+    BLUE_BOLD = '\033[1;34m'
+    MAGENTA_BOLD = '\033[1;35m'
+    CYAN_BOLD = '\033[1;36m'
+    WHITE_BOLD = '\033[1;37m'
+
+    # Underline Colors
+    BLACK_UNDERLINED = '\033[4;30m'
+    RED_UNDERLINED = '\033[4;31m'
+    GREEN_UNDERLINED = '\033[4;32m'
+    YELLOW_UNDERLINED = '\033[4;33m'
+    BLUE_UNDERLINED = '\033[4;34m'
+    MAGENTA_UNDERLINED = '\033[4;35m'
+    CYAN_UNDERLINED = '\033[4;36m'
+    WHITE_UNDERLINED = '\033[4;37m'
+
+    # Background Colors
+    BLACK_BACKGROUND = '\033[40m'
+    RED_BACKGROUND = '\033[41m'
+    GREEN_BACKGROUND = '\033[42m'
+    YELLOW_BACKGROUND = '\033[43m'
+    BLUE_BACKGROUND = '\033[44m'
+    MAGENTA_BACKGROUND = '\033[45m'
+    CYAN_BACKGROUND = '\033[46m'
+    WHITE_BACKGROUND = '\033[47m'
+
+    # High Intensity Colors
+    BLACK_BRIGHT = '\033[90m'
+    RED_BRIGHT = '\033[91m'
+    GREEN_BRIGHT = '\033[92m'
+    YELLOW_BRIGHT = '\033[93m'
+    BLUE_BRIGHT = '\033[94m'
+    MAGENTA_BRIGHT = '\033[95m'
+    CYAN_BRIGHT = '\033[96m'
+    WHITE_BRIGHT = '\033[97m'
+
+    # High Intensity Background Colors
+    BLACK_BACKGROUND_BRIGHT = '\033[100m'
+    RED_BACKGROUND_BRIGHT = '\033[101m'
+    GREEN_BACKGROUND_BRIGHT = '\033[102m'
+    YELLOW_BACKGROUND_BRIGHT = '\033[103m'
+    BLUE_BACKGROUND_BRIGHT = '\033[104m'
+    MAGENTA_BACKGROUND_BRIGHT = '\033[105m'
+    CYAN_BACKGROUND_BRIGHT = '\033[106m'
+    WHITE_BACKGROUND_BRIGHT = '\033[107m'
 
 ## end DD consts / vars
 
@@ -73,6 +132,30 @@ def sample_top_p(logits: torch.Tensor, top_p: float) -> torch.Tensor:
 
 
 #### DD FUNCS
+def log(value, log_file='sample.log'):
+    """
+    Logs the given value to a file with a human-readable timestamp.
+    
+    Args:
+    value: Any value to be logged
+    log_file (str): The name of the log file (default is 'log.txt')
+    """
+    # Get current timestamp
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    message_str = str(value)
+    
+    # Create the log message
+    log_message = f"[{timestamp}] {message_str}\n"
+    
+    # Ensure the directory exists
+    # os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    
+    # Write to the log file
+    with open(log_file, 'a') as f:
+        f.write(log_message)
+
+
 
 # Dynamic Temperature Adjustment:
 def adjust_temperature(entropy, target_entropy, current_temp):
@@ -174,6 +257,56 @@ def calculate_varentropy(logits: torch.Tensor) -> torch.Tensor:
     return varentropy
 
 
+def beam_search(logits, beam_width, max_steps, model_fn):
+    # Initialize beam with the initial logits
+    beam = [([], 0, logits)]  # (sequence, score, current_logits)
+    
+    for _ in range(max_steps):
+        candidates = []
+        
+        for sequence, score, logits in beam:
+            
+            # Convert logits to probabilities
+            probs = F.softmax(logits, dim=-1)
+            
+            # Get the top k candidates
+            top_probs, top_indices = torch.topk(probs, beam_width)
+            
+            for prob, index in zip(top_probs[0], top_indices[0]):
+                new_sequence = sequence + [index.item()]
+                new_score = score + torch.log(prob).item()
+                
+                # Get next logits using the provided model function
+                next_logits = model_fn(new_sequence)
+                
+                candidates.append((new_sequence, new_score, next_logits))
+        
+        # Select the top beam_width candidates
+        beam = sorted(candidates, key=lambda x: x[1], reverse=True)[:beam_width]
+        
+        # Check if we've reached the desired sequence length
+        if len(beam[0][0]) >= max_steps:
+            break
+    
+    # Return the sequence with the highest score
+    return max(beam, key=lambda x: x[1])[0]
+
+def apply_precision_limit(logits, vocab_size=128256):
+    # Constants
+    u = 2**(-7)  # bfloat16 relative error
+    min_logprob = math.log(u) - math.log(vocab_size) / 2
+    
+    # Convert min_logprob to the appropriate device and dtype
+    min_logprob_tensor = torch.tensor(min_logprob, device=logits.device, dtype=logits.dtype)
+    
+    # Create a mask for logits below the threshold
+    mask = logits < min_logprob_tensor
+    
+    # Set values below threshold to -inf
+    logits[mask] = float('-inf')
+    
+    return logits
+
 
 ##### END DD FUNCS
 
@@ -194,59 +327,185 @@ def sample(
     # if low_probability_threshold < 0.0 or low_probability_threshold > 1.0:
     #     raise ValueError(f"low_probability_threshold must be in [0, 1], got {low_probability_threshold}")
     
-    # global backoff_counter
-    # global backoff_constant
+    global backoff_counter
+    global backoff_constant
+
+    global greedy_constant
+    global greedy_counter
+
+    # this should be in next_token() really
+    if backoff_counter > 0: backoff_counter = backoff_counter - 1 
+    log("backoff is: " + str(backoff_counter))
+    if greedy_counter > 0: greedy_counter = greedy_counter - 1 
+    log("backoff is: " + str(greedy_counter))
+
 
     global bcolors
 
     # get 1d tensor of vocab size
     logits = logits[0, -1]
 
+    # remove anything below noise level
+    logits = apply_precision_limit(logits)
+
     # Calculate entropy and varentropy before sampling
-    e_pre = calculate_entropy(logits)
-    ve_pre = calculate_varentropy(logits)
+    e_pre = calculate_entropy(logits).item()
+    ve_pre = calculate_varentropy(logits).item()
 
+    log("e_pre: " + str(e_pre))
+    log("ve_pre: " + str(ve_pre))
 
-    # le = 0.3
-    # lv = 1.2
-    # he = 2.5
-    # hv = 2.5
+    # constants for comparisons
+    le = 0.3
+    lv = 1.2
+    he = 2.5
+    hv = 2.5
+
+    # use temperature to blow things up
+    # if e_pre > 1 :
+    #     temperature = 0.99
+    #     log("temperature scaling: " + str(temperature))
+    #     logits = logits * temperature
+    #     log("e_pre: " + str(e_pre) + " - " + str(calculate_entropy(logits).item()))
 
     # set default text colour
-    print(f"{bcolors.HEADER}",end='') # purple?
+    print(f"{bcolors.WHITE}",end='') # white
 
-    for i in range(5):
+    # LE LV (argmax): 
+    # tbh, bit worried that argmax/greedy limits reasoning based on https://arxiv.org/pdf/2402.10200
+    if e_pre < le and ve_pre < lv and greedy_counter <= 0:
+        log("returning argmax next_token")
+        print(f"{bcolors.CYAN}",end='') # cyan
+        next_token = torch.argmax(logits, dim=-1, keepdim=True)
+        return next_token
 
-        # optionally crop the logits to only the top k options
-        if top_k is not None:
-            v, i = torch.topk(logits, min(top_k, logits.size(-1)))
-            logits = torch.full_like(logits, float("-inf")).scatter_(-1, i, v)
-        
-        # optionally scale the logits and sample from a probability distribution
-        if temperature > 0.0 or top_p > 0.0:
+    # LE HV (branch):
+    # possibly stuck in "local optimum"
+    if e_pre < le and ve_pre > hv:
+        print(f"{bcolors.MAGENTA}",end='') # magenta
+
+        # adjust temperature to induce variation
+        if temperature > 0.0:
+            temperature = temperature * ( 1 + random.random(-0.1,0.1) )
+            if temperature > 1.0:
+                temperature = 0.99
+        else:
+            temperature = 0.80
+
+        log("temperature scaling: " + str(temperature))
+        logits = logits / temperature
+
+        # add noise to induce variation
+        log("adding noise")
+        noise = torch.randn_like(logits) * 0.8 # Adjust the scale as needed
+        logits = logits + noise
+
+        # beam search - TBC
+        # idea - - add noise, reduce top_k, reduce top_p until the model is no longer uncertain?
+
+        # falsl through to adaptive sampling
+
+    # HE LV:
+    if e_pre > he and ve_pre < lv and backoff_counter <= 0 :
+        # Model has divergent views; explore alternative paths.
+        # output "think again" tokens 
+        print(f"{bcolors.GREEN}",end='') # green
+        backoff_counter = backoff_constant # set this so we don't keep interrupting the model.
+        log("returning WAIT.. token")
+        return torch.tensor([2564], dtype=torch.int64, device=logits.device)
+
+    # HE HV (resample, but this seems quite deterministic anyway??):
+    if e_pre > he and ve_pre > hv: 
+        print(f"{bcolors.RED}",end='') # red
+
+        resampling = False 
+        for counter in range(5):
+
+            ##### adaptive sampling 
+            log("temp, top_k, top_p: " + str(temperature) + ", " + str(top_k) + ", " + str(top_p) )
+
+            step_logits = logits # reset step_logits
+
+            # apply temperature to all 
             if temperature > 0.0:
-                logits = logits / temperature
+                        log("temperature scaling: " + str(temperature))
+                        step_logits = step_logits / temperature
+
+            # optionally crop the logits to only the top k options
+            if top_k is not None:
+                log("top_k sampling: " + str(top_k) )
+                v, i = torch.topk(logits, min(top_k, step_logits.size(-1)))
+                step_logits = torch.full_like(step_logits, float("-inf")).scatter_(-1, i, v)
+            
             # optionally crop the logits to smallest set of logits with a cumulative probability above top_p
             if top_p < 1.0:
-                logits = sample_top_p(logits, top_p)
-            probs = torch.nn.functional.softmax(logits, dim=-1)
+                log("top_p cropping: " + str(top_p))
+                step_logits = sample_top_p(step_logits, top_p)
+
+            # Calculate entropy and varentropy after 
+            e_post = calculate_entropy(step_logits).item()
+            ve_post = calculate_varentropy(step_logits).item()
+
+            # always use multinomial output
+            probs = torch.softmax(step_logits, dim=-1)
             next_token = multinomial_num_samples_1(probs)
 
-        next_token = torch.argmax(logits, dim=-1, keepdim=True)
 
-        # Calculate entropy and varentropy before sampling
-        e_post = calculate_entropy(logits)
-        ve_post = calculate_varentropy(logits)
+            log("next token: " + str(next_token.item()))
 
-        if e_post < e_pre and ve_post<ve_pre:
+            log("e: " + str(e_pre) + " " + str(e_post))
+            log("ve: " + str(ve_pre) + " " + str(ve_post))
+
+            # print("ve: ", ve_pre, " ", ve_post)
+
+            # # rethink:
+            # # if entropy low and varentropy low, even on subsampled distribution
+            # if e_post < 1.0:
+
+
+            if e_post < 1.0 :
+            #if e_post < e_pre or  ve_post < ve_pre:
+                #print(e_pre - e_post, " ", ve_pre - ve_post )
+                log("returning next_token")
+                resampling = False
+                return next_token
+            else:
+                log("looping with changed parameters: " + str(counter))
+                #print("loop")
+                temperature = 1.0
+                #top_p = 0.3
+                #top_k = 10
+                resampling = True
+
             return next_token
-        else:
-            print(f"{bcolors.OKBLUE}",end='') # blue
-            temperature = 1 
-            top_p = 0.3
-            top_k = 50
+
+    print(f"{bcolors.YELLOW}",end='') # yellow
+
+    ##### adaptive sampling 
+    log("temp, top_k, top_p: " + str(temperature) + ", " + str(top_k) + ", " + str(top_p) )
+
+    # apply temperature to all 
+    if temperature > 0.0:
+                log("temperature scaling: " + str(temperature))
+                logits = logits / temperature
+
+    # optionally crop the logits to only the top k options
+    if top_k is not None:
+        log("top_k sampling: " + str(top_k) )
+        v, i = torch.topk(logits, min(top_k, logits.size(-1)))
+        logits = torch.full_like(logits, float("-inf")).scatter_(-1, i, v)
+    
+    # optionally crop the logits to smallest set of logits with a cumulative probability above top_p
+    if top_p < 1.0:
+        log("top_p cropping: " + str(top_p))
+        logits = sample_top_p(logits, top_p)
+
+    # always use multinomial output
+    probs = torch.softmax(logits, dim=-1)
+    next_token = multinomial_num_samples_1(probs)
 
     # if we fail to get something better, return what we have
+    log("fell through, returning adaptive next_token")
     return next_token
 
         

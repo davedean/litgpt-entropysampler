@@ -174,9 +174,9 @@ def main(
     checkpoint_dir: Path,
     *,
     max_new_tokens: int = 5000, # bigger default for entropy sampler testing
-    top_k: Optional[int] = None,
+    top_k: Optional[int] = 50,
     top_p: float = 1.0,
-    temperature: float = 0.8,
+    temperature: float = 0.1,
     quantize: Optional[Literal["bnb.nf4", "bnb.nf4-dq", "bnb.fp4", "bnb.fp4-dq", "bnb.int8"]] = None,
     precision: Optional[str] = None,
     compile: bool = False,
