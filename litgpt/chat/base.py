@@ -134,7 +134,33 @@ def interact(multiline, model, tokenizer, prompt_style, fabric, temperature, max
 
         # DD EDIT - kick the step-by-step reasoning into existence here.
         if prompt != "" :
-            prompt = "remember to think step by step to answer the users question. You'll provide your reasoning, and if you get confused you will start over, summarize what you know so far, and then continue. Remember to think clearly and explain as you go. The user prompt is: " + prompt
+
+            base_prompt = """
+            <|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+            Think step by step to answer the users question.
+            You'll provide your reasoning, and if you get confused you will start over, summarize what you know so far, and then continue. 
+            Remember to think clearly and explain as you go. 
+
+            When you go to make your final answer, you will provide a json output like this:
+            {"reasoning": "summary of your reasoning goes in here, keep it direct.", "answer": "actual answer to user" }
+
+            example, 
+                question was: "why is the sky blue?"
+                {"reasoning": "sThe atmosphere scatters sunlight in all directions, but is not evenly distributed, leading to the scattering of blue light more than other wavelengths, which causes the sky to appear blue.", "answer": "Rayleigh Scattering" }
+
+            The user will not see your untagged output, always output a final reasoning and a final answer.
+                        
+            The user prompt follows.
+            
+            <|eot_id|>
+
+            <|start_header_id|>user<|end_header_id|>
+            
+            """
+            prompt = base_prompt + prompt + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+
+            #print(prompt)
 
         prompt = prompt.lower().strip()
         if not prompt or prompt in ("!quit", "!exit"):
@@ -148,7 +174,7 @@ def main(
     checkpoint_dir: Path,
     *,
     max_new_tokens: int = 5000, # bigger default for entropy sampler testing
-    top_k: Optional[int] = 50,
+    top_k: Optional[int] = None,
     top_p: float = 1.0,
     temperature: float = 0.8,
     quantize: Optional[Literal["bnb.nf4", "bnb.nf4-dq", "bnb.fp4", "bnb.fp4-dq", "bnb.int8"]] = None,

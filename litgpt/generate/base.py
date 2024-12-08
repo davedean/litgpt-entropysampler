@@ -30,9 +30,24 @@ from litgpt.utils import (
     load_checkpoint
 )
 
-backoff_counter=40
-backoff_constant=40
-seed=1234
+
+## DD Consts / Vars (yeah yeah yeah, bad) 
+# backoff_counter=40
+# backoff_constant=40
+# seed=1234
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+## end DD consts / vars
 
 def multinomial_num_samples_1(probs: torch.Tensor) -> torch.Tensor:
     if torch._dynamo.is_compiling():
@@ -56,6 +71,44 @@ def sample_top_p(logits: torch.Tensor, top_p: float) -> torch.Tensor:
     logits = logits.masked_fill(indices_to_remove, float("-inf"))
     return logits
 
+
+#### DD FUNCS
+
+# Dynamic Temperature Adjustment:
+def adjust_temperature(entropy, target_entropy, current_temp):
+    return current_temp * (target_entropy / entropy)
+
+# Entropy-based Token Filtering:
+def filter_tokens(logits, min_entropy, max_entropy):
+    probs = F.softmax(logits, dim=-1)
+    entropy = -torch.sum(probs * torch.log(probs), dim=-1)
+    return logits * ((entropy > min_entropy) & (entropy < max_entropy))
+
+# Adaptive Top-k:
+def adaptive_top_k(logits, target_entropy):
+    k = 1
+    while calculate_entropy(top_k(logits, k)) < target_entropy:
+        k += 1
+    return top_k(logits, k)
+
+# Entropy-based Resampling:
+# def entropy_resample(logits, target_entropy, max_attempts=5):
+#     for _ in range(max_attempts):
+#         token = sample(logits)
+#         if abs(calculate_entropy(get_next_logits(token)) - target_entropy) < threshold:
+#             return token
+#     return fallback_sampling(logits)
+
+
+# Contextual Entropy Targeting:
+# def get_target_entropy(context):
+#     if is_open_ended(context):
+#         return HIGH_ENTROPY
+#     elif is_factual(context):
+#         return LOW_ENTROPY
+#     else:
+#         return MEDIUM_ENTROPY
+ 
 
 def calculate_entropy(logits: torch.Tensor) -> torch.Tensor:
     
@@ -122,6 +175,8 @@ def calculate_varentropy(logits: torch.Tensor) -> torch.Tensor:
 
 
 
+##### END DD FUNCS
+
 
 def sample(
     logits: torch.Tensor,
@@ -129,85 +184,72 @@ def sample(
     top_k: Optional[int] = None,
     top_p: float = 1.0,
     # low_probability_tokens: Optional[List[int]] = [11748, 11748],
-    low_probability_tokens: Optional[int] = 83461, # is 9 \n's in a row.
+    # low_probability_tokens: Optional[int] = 83461, # is 9 \n's in a row.
     # low_probability_threshold: float = 0.7,
-    entropy_threshold: float = 0.4,
-    varentropy_threshold: float = 0.4
+    # entropy_threshold: float = 0.4,
+    # varentropy_threshold: float = 0.4
 ) -> torch.Tensor:
     if top_p < 0.0 or top_p > 1.0:
         raise ValueError(f"top_p must be in [0, 1], got {top_p}")
     # if low_probability_threshold < 0.0 or low_probability_threshold > 1.0:
     #     raise ValueError(f"low_probability_threshold must be in [0, 1], got {low_probability_threshold}")
     
-    global backoff_counter
-    global backoff_constant
+    # global backoff_counter
+    # global backoff_constant
 
+    global bcolors
+
+    # get 1d tensor of vocab size
     logits = logits[0, -1]
 
-    # Calculate entropy and varentropy
-    entropies = calculate_entropy(logits)
-    varentropies = calculate_varentropy(logits)
+    # Calculate entropy and varentropy before sampling
+    e_pre = calculate_entropy(logits)
+    ve_pre = calculate_varentropy(logits)
 
-    # print(entropies.item())
-    # print(varentropies)
 
-    class bcolors:
-        HEADER = '\033[95m'
-        OKBLUE = '\033[94m'
-        OKCYAN = '\033[96m'
-        OKGREEN = '\033[92m'
-        WARNING = '\033[93m'
-        FAIL = '\033[91m'
-        ENDC = '\033[0m'
-        BOLD = '\033[1m'
-        UNDERLINE = '\033[4m'
+    # le = 0.3
+    # lv = 1.2
+    # he = 2.5
+    # hv = 2.5
 
-    le = 0.3
-    lv = 1.2
-    he = 2.5
-    hv = 2.5
-
+    # set default text colour
     print(f"{bcolors.HEADER}",end='') # purple?
 
-    if entropies < le and varentropies < lv:
-        print(f"{bcolors.OKBLUE}",end='') # blue
-        # situation good! Go ahead! 
-        return torch.argmax(logits, dim=-1, keepdim=True)
+    # Entropix style:
+    # if entropies < le and varentropies < lv:
+    #     print(f"{bcolors.OKBLUE}",end='') # blue
+    #     # situation good! Go ahead! 
+    #     return torch.argmax(logits, dim=-1, keepdim=True)
 
-    #elif entropies < entropy_threshold and varentropies > varentropy_threshold:
-    elif entropies < le and varentropies > hv:
-        if backoff_counter==0:
-            print(f"{bcolors.OKGREEN}",end='') # green
+    # #elif entropies < entropy_threshold and varentropies > varentropy_threshold:
+    # elif entropies < le and varentropies > hv:
+    #     if backoff_counter==0:
+    #         print(f"{bcolors.OKGREEN}",end='') # green
 
-            # Model has divergent views; explore alternative paths.
-            # output "think again" tokens 
-            backoff_counter = backoff_constant # set this so we don't keep interrupting the model.
-            return torch.tensor([low_probability_tokens], dtype=torch.int64, device=logits.device)
+    #         # Model has divergent views; explore alternative paths.
+    #         # output "think again" tokens 
+    #         backoff_counter = backoff_constant # set this so we don't keep interrupting the model.
+    #         return torch.tensor([low_probability_tokens], dtype=torch.int64, device=logits.device)
 
-    elif entropies > he and varentropies > he:
-        print(f"{bcolors.WARNING}",end='') # yellow 
+    # elif entropies > he and varentropies > he:
+    #     print(f"{bcolors.WARNING}",end='') # yellow 
 
-        # Model is very uncertain; resample with adjusted parameters.
-        temperature=1.0
-        global seed 
-        seed = randint(0,9999)
+    #     # Model is very uncertain; resample with adjusted parameters.
+    #     temperature=1.0
+    #     global seed 
+    #     seed = randint(0,9999)
 
 
 
-    elif entropies > he and varentropies < lv:
-        if backoff_counter < 20 :
-            print(f"{bcolors.FAIL}FFFFF",end='') # ???
+    # elif entropies > he and varentropies < lv:
+    #     if backoff_counter < 20 :
+    #         print(f"{bcolors.FAIL}FFFFF",end='') # ???
 
-            # print("high,low")
-            # Model is uncertain but consistent; increase temperature.
+    #         # print("high,low")
+    #         # Model is uncertain but consistent; increase temperature.
             
-            # bump it up baby
-            temperature = 1.0
-
-
-    # fall through to regular sampling .. 
-    if backoff_counter>0 :
-        backoff_counter = backoff_counter - 1  
+    #         # bump it up baby
+    #         temperature = 1.0
 
     # optionally crop the logits to only the top k options
     if top_k is not None:
@@ -222,13 +264,23 @@ def sample(
         if top_p < 1.0:
             logits = sample_top_p(logits, top_p)
         probs = torch.nn.functional.softmax(logits, dim=-1)
-        return multinomial_num_samples_1(probs)
+        next_token = multinomial_num_samples_1(probs)
 
-      
-    print(f"{bcolors.BOLD}",end='') # ???
+    next_token = torch.argmax(logits, dim=-1, keepdim=True)
 
-    return torch.argmax(logits, dim=-1, keepdim=True)
-    #return torch.argmax(logits, dim=-1, keepdim=True)
+    # Calculate entropy and varentropy before sampling
+    e_post = calculate_entropy(logits)
+    ve_post = calculate_varentropy(logits)
+
+    if e_post < e_pre and ve_post<ve_pre:
+        return next_token
+    else:
+        print(f"{bcolors.OKBLUE}",end='') # blue
+        temperature = 1 
+        top_p = 0.3
+        top_k = 50
+        
+
 
 
 def next_token(model: GPT, input_pos: torch.Tensor, x: torch.Tensor, **kwargs: Any) -> torch.Tensor:
