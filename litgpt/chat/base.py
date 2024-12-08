@@ -142,15 +142,14 @@ def interact(multiline, model, tokenizer, prompt_style, fabric, temperature, max
 
         process_prompt(prompt, model, tokenizer, prompt_style, fabric, temperature, max_new_tokens, top_k, top_p, stop_tokens)
 
-
 @torch.inference_mode()
 def main(
     checkpoint_dir: Path,
     *,
     max_new_tokens: int = 5000, # bigger default for entropy sampler testing
-    top_k: Optional[int] = 50,
-    top_p: float = 1.0,
-    temperature: float = 0.8,
+    top_k: Optional[int] = 5000,   # we _want_ nonsense tokens. embiggen.
+    top_p: float = 0.0,         # still tuning, 0.94 for gemini apparently ..
+    temperature: float = 0.9,   # 
     quantize: Optional[Literal["bnb.nf4", "bnb.nf4-dq", "bnb.fp4", "bnb.fp4-dq", "bnb.int8"]] = None,
     precision: Optional[str] = None,
     compile: bool = False,

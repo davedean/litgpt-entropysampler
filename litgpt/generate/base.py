@@ -33,6 +33,10 @@ from litgpt.utils import (
 backoff_counter=40
 backoff_constant=40
 seed=1234
+logfile="./sampler.log"
+log_run=0
+log_avg_e=0.0
+log_avg_v=0.0
 
 def multinomial_num_samples_1(probs: torch.Tensor) -> torch.Tensor:
     if torch._dynamo.is_compiling():
@@ -129,7 +133,8 @@ def sample(
     top_k: Optional[int] = None,
     top_p: float = 1.0,
     # low_probability_tokens: Optional[List[int]] = [11748, 11748],
-    low_probability_tokens: Optional[int] = 83461, # is 9 \n's in a row.
+    low_probability_tokens: Optional[int] = 2564, # <<-- entropix uses this?? # 83461, # is 9 \n's in a row.
+    resample_token: Optional[int] = 116833, # <<-- "????????????????", no-one will miss that. 
     # low_probability_threshold: float = 0.7,
     entropy_threshold: float = 0.4,
     varentropy_threshold: float = 0.4
@@ -143,6 +148,12 @@ def sample(
     global backoff_constant
 
     logits = logits[0, -1]
+
+
+    # crop to top_k 
+    top_k = 500
+    v, i = torch.topk(logits, min(top_k, logits.size(-1)))
+    logits = torch.full_like(logits, float("-inf")).scatter_(-1, i, v)
 
     # Calculate entropy and varentropy
     entropies = calculate_entropy(logits)
@@ -164,8 +175,8 @@ def sample(
 
     le = 0.3
     lv = 1.2
-    he = 2.5
-    hv = 2.5
+    he = 2.2
+    hv = 2.2
 
     print(f"{bcolors.HEADER}",end='') # purple?
 
@@ -175,7 +186,7 @@ def sample(
         return torch.argmax(logits, dim=-1, keepdim=True)
 
     #elif entropies < entropy_threshold and varentropies > varentropy_threshold:
-    elif entropies < le and varentropies > hv:
+    elif entropies < he and varentropies > hv:
         if backoff_counter==0:
             print(f"{bcolors.OKGREEN}",end='') # green
 
@@ -187,22 +198,81 @@ def sample(
     elif entropies > he and varentropies > he:
         print(f"{bcolors.WARNING}",end='') # yellow 
 
-        # Model is very uncertain; resample with adjusted parameters.
-        temperature=1.0
-        global seed 
-        seed = randint(0,9999)
+        # # Model is very uncertain; resample with adjusted parameters.
+        temperature=4.0
+        top_k = 20
+        top_p = 0.1
 
+        # # global seed 
+        # # seed = randint(0,9999)
+
+        # # crop to top_k 
+        v, i = torch.topk(logits, min(top_k, logits.size(-1)))
+        logits = torch.full_like(logits, float("-inf")).scatter_(-1, i, v)
+
+        # Add noise to logits
+        noise = torch.randn_like(logits) #* 0.5
+        logits = logits + noise
+
+        # temperature
+        logits = logits / temperature
+        
+        # top_p
+        logits = sample_top_p(logits, top_p)
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+        return multinomial_num_samples_1(probs)
+
+        ### CLAUDE SUGGESTS:
+        # Add noise to logits
+        # noise = torch.randn_like(logits) * 0.5
+        # logits = logits + noise
+
+        # # Invert logits and use lower temperature
+        # logits = -logits
+        # temperature = 0.5
+
+        # # Sample from bottom_k
+        # bottom_k = 100
+        # v, i = torch.topk(-logits, min(bottom_k, logits.size(-1)))
+        # logits = torch.full_like(logits, float("-inf")).scatter_(-1, i, -v)
+
+        # # Exclude recent tokens
+        # recent_tokens = get_recent_tokens(n=10)  # Implement this function
+        # for token in recent_tokens:
+        #     logits[token] = float("-inf")
+
+        # # Apply temperature
+        # logits = logits / temperature
+
+        # # Use weighted random sampling
+        # weights = torch.exp(logits - logits.max())
+        # candidate = torch.multinomial(weights, num_samples=1).item()
+        # return torch.tensor(candidate, dtype=torch.int64, device=logits.device)
+        ## END CLAUDE
+
+        # return a random one
+        #return torch.tensor(random.randint(0, len(logits) - 1), dtype=torch.int64, device=logits.device)
+        
+
+        # epsilon=0.1
+        # if random.random() < epsilon:
+        #     return torch.tensor(random.randint(0, len(logits) - 1), dtype=torch.int64, device=logits.device)
+        # else:
+        #     # return torch.argmax(logits).item()
+        #return torch.tensor([resample_token], dtype=torch.int64, device=logits.device)
 
 
     elif entropies > he and varentropies < lv:
         if backoff_counter < 20 :
-            print(f"{bcolors.FAIL}FFFFF",end='') # ???
+            print(f"{bcolors.FAIL}",end='') # ???
 
             # print("high,low")
             # Model is uncertain but consistent; increase temperature.
             
             # bump it up baby
-            temperature = 1.0
+            temperature = 2.0
+            top_k = 50
+            top_p = 0.5
 
 
     # fall through to regular sampling .. 
@@ -225,7 +295,7 @@ def sample(
         return multinomial_num_samples_1(probs)
 
       
-    print(f"{bcolors.BOLD}",end='') # ???
+    print(f"{bcolors.BOLD}MMM",end='') # ???
 
     return torch.argmax(logits, dim=-1, keepdim=True)
     #return torch.argmax(logits, dim=-1, keepdim=True)
@@ -347,10 +417,8 @@ def generate_fn(
         # set this, because we will change it when we get a wait ... token 
         token_len=1 
 
-        if token.item() != 83461: # 9 \n's in a row .. 
-            tokens.append(token)
-            int_token = token.item()
-        else:
+        # used to insert a "CoT phrase" based on a chosen token:
+        if token.item() == 83461:
             cot_phrases = [
             # wait .. I need to think step by step. 
             [ 220, 11748, 1131, 358, 1205, 311, 1781, 3094, 555, 3094, 13, 220, ], 
@@ -368,6 +436,33 @@ def generate_fn(
             tokens.append(torch.tensor(cot_phrase, dtype=torch.int64, device=device)) # add a CoT phrase
 
             int_token = 220 # set the last token to a space.
+            
+        
+        # the "resample" token .. skip the rest of the loop and try sampling again
+        if token.item() == 116833:
+
+            # set parameters differently somehow
+            top_k = 50
+            top_p = 0.3
+            temperature = 0.80
+            #print("resampling"), works but doesn't update the tokens so we get stuck here forever.
+            # print("REMOVE PREVIOUS TOKEN: ",tokens[-1].item())
+
+            #if len(tokens) >= prompt_size:
+            # token=tokens[-1]
+            # tokens.pop() # remove previous token so we can try a different path??
+            # current_idx = current_idx-1
+            # safe_idx = current_idx
+            # input_pos.add_(-1) # add the cot_phrase len, or 1
+
+            continue # try again 
+        else:
+            # reset these to sane numbers
+            top_k = 500
+            top_p = 1.0
+
+        tokens.append(token)
+        int_token = token.item()
 
         # Check for stop sequences
         # For each stop sequence, we keep a running total of how many are matched in stop_progress.
