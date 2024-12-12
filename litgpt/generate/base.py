@@ -6,6 +6,8 @@ from pathlib import Path
 from pprint import pprint
 from typing import Any, Literal, Optional, Tuple, List, Union, Iterator
 import warnings
+import datetime
+import math
 
 import lightning as L
 import torch
@@ -27,6 +29,113 @@ from litgpt.utils import (
 )
 
 
+class bcolors:
+    # Reset
+    RESET = '\033[0m'
+
+    # Regular Colors
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+
+    # Bold Colors
+    BLACK_BOLD = '\033[1;30m'
+    RED_BOLD = '\033[1;31m'
+    GREEN_BOLD = '\033[1;32m'
+    YELLOW_BOLD = '\033[1;33m'
+    BLUE_BOLD = '\033[1;34m'
+    MAGENTA_BOLD = '\033[1;35m'
+    CYAN_BOLD = '\033[1;36m'
+    WHITE_BOLD = '\033[1;37m'
+
+    # Underline Colors
+    BLACK_UNDERLINED = '\033[4;30m'
+    RED_UNDERLINED = '\033[4;31m'
+    GREEN_UNDERLINED = '\033[4;32m'
+    YELLOW_UNDERLINED = '\033[4;33m'
+    BLUE_UNDERLINED = '\033[4;34m'
+    MAGENTA_UNDERLINED = '\033[4;35m'
+    CYAN_UNDERLINED = '\033[4;36m'
+    WHITE_UNDERLINED = '\033[4;37m'
+
+    # Background Colors
+    BLACK_BACKGROUND = '\033[40m'
+    RED_BACKGROUND = '\033[41m'
+    GREEN_BACKGROUND = '\033[42m'
+    YELLOW_BACKGROUND = '\033[43m'
+    BLUE_BACKGROUND = '\033[44m'
+    MAGENTA_BACKGROUND = '\033[45m'
+    CYAN_BACKGROUND = '\033[46m'
+    WHITE_BACKGROUND = '\033[47m'
+
+    # High Intensity Colors
+    BLACK_BRIGHT = '\033[90m'
+    RED_BRIGHT = '\033[91m'
+    GREEN_BRIGHT = '\033[92m'
+    YELLOW_BRIGHT = '\033[93m'
+    BLUE_BRIGHT = '\033[94m'
+    MAGENTA_BRIGHT = '\033[95m'
+    CYAN_BRIGHT = '\033[96m'
+    WHITE_BRIGHT = '\033[97m'
+
+    # High Intensity Background Colors
+    BLACK_BACKGROUND_BRIGHT = '\033[100m'
+    RED_BACKGROUND_BRIGHT = '\033[101m'
+    GREEN_BACKGROUND_BRIGHT = '\033[102m'
+    YELLOW_BACKGROUND_BRIGHT = '\033[103m'
+    BLUE_BACKGROUND_BRIGHT = '\033[104m'
+    MAGENTA_BACKGROUND_BRIGHT = '\033[105m'
+    CYAN_BACKGROUND_BRIGHT = '\033[106m'
+    WHITE_BACKGROUND_BRIGHT = '\033[107m'
+
+    # Special Formatting
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    BLINK = '\033[5m'
+    REVERSE = '\033[7m'
+    HIDDEN = '\033[8m'
+
+    # Keep your original naming conventions for compatibility
+    HEADER = MAGENTA
+    OKBLUE = BLUE
+    OKCYAN = CYAN
+    OKGREEN = GREEN
+    WARNING = YELLOW
+    FAIL = RED
+    ENDC = RESET
+
+
+
+
+def log(value, log_file='sample.log'):
+    """
+    Logs the given value to a file with a human-readable timestamp.
+
+    Args:
+    value: Any value to be logged
+    log_file (str): The name of the log file (default is 'log.txt')
+    """
+    # Get current timestamp
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    message_str = str(value)
+
+    # Create the log message
+    log_message = f"[{timestamp}] {message_str}\n"
+
+    # Ensure the directory exists
+    # os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+    # Write to the log file
+    with open(log_file, 'a') as f:
+        f.write(log_message)
+
+
 def multinomial_num_samples_1(probs: torch.Tensor) -> torch.Tensor:
     if torch._dynamo.is_compiling():
         # Faster alternative to `torch.multinomial(probs, num_samples=1)` that is also CUDAGraph friendly
@@ -35,48 +144,351 @@ def multinomial_num_samples_1(probs: torch.Tensor) -> torch.Tensor:
     return torch.multinomial(probs, num_samples=1)
 
 
-def sample_top_p(logits: torch.Tensor, top_p: float) -> torch.Tensor:
-    sorted_logits, sorted_indices = torch.sort(logits, descending=False)
-    cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
-    # Example:
-    # sorted_probs=[0.1, 0.15, 0.2, 0.25, 0.3] -> sorted_cumprobs=[0.1, 0.25, 0.45, 0.7, 1.0]
-    # sorted_indices_to_remove = [1, 1, 0, 0, 0] if top_p=0.7
-    sorted_indices_to_remove = cumulative_probs <= (1 - top_p)
-    # Keep at least 1 token always to prevent the case where no token is selected
-    # In this case the most probable one is always kept
-    sorted_indices_to_remove[-1:] = 0
-    indices_to_remove = sorted_indices_to_remove.scatter(0, sorted_indices, sorted_indices_to_remove)
-    logits = logits.masked_fill(indices_to_remove, float("-inf"))
+def crop_top_p(logits: torch.Tensor, top_p: float) -> torch.Tensor:
+    if top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=False)
+        cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+        # Example:
+        # sorted_probs=[0.1, 0.15, 0.2, 0.25, 0.3] -> sorted_cumprobs=[0.1, 0.25, 0.45, 0.7, 1.0]
+        # sorted_indices_to_remove = [1, 1, 0, 0, 0] if top_p=0.7
+        sorted_indices_to_remove = cumulative_probs <= (1 - top_p)
+        # Keep at least 1 token always to prevent the case where no token is selected
+        # In this case the most probable one is always kept
+        sorted_indices_to_remove[-1:] = 0
+        indices_to_remove = sorted_indices_to_remove.scatter(0, sorted_indices, sorted_indices_to_remove)
+        logits = logits.masked_fill(indices_to_remove, float("-inf"))
     return logits
 
+def crop_top_k(logits: torch.Tensor, top_k: float) -> torch.Tensor:
+    if top_k is not None:
+        v, i = torch.topk(logits, min(top_k, logits.size(-1)))
+        # do not use `torch.where` as in nanogpt because it will repeat top-k collisions
+        logits = torch.full_like(logits, float("-inf")).scatter_(-1, i, v)
+
+    return logits
+
+def crop_min_p(logits: torch.Tensor, min_p: float) -> torch.Tensor:
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+    probabilities = sorted_logits.softmax(dim=-1)
+    
+    # Find the index where probabilities fall below min_p
+    cutoff_index = torch.where(probabilities < min_p)[0]
+    if len(cutoff_index) > 0:
+        cutoff_index = cutoff_index[0]
+    else:
+        cutoff_index = len(probabilities)
+    
+    # Create a mask for indices to keep
+    indices_to_keep = torch.zeros_like(logits, dtype=torch.bool)
+    indices_to_keep[sorted_indices[:cutoff_index]] = True
+    
+    # Set logits of tokens below min_p to negative infinity
+    logits = torch.where(indices_to_keep, logits, torch.full_like(logits, float('-inf')))
+    
+    return logits
+
+
+def keep_highest_logits(logits: torch.Tensor, threshold_factor: float = 1.5) -> torch.Tensor:
+    # Calculate the mean and standard deviation of the logits
+    mean = torch.mean(logits)
+    std = torch.std(logits)
+    
+    # Calculate the threshold
+    threshold = mean + threshold_factor * std
+    
+    # Create a mask for indices to keep
+    indices_to_keep = logits > threshold
+    
+    # Set logits below the threshold to negative infinity
+    result = torch.where(indices_to_keep, logits, torch.full_like(logits, float('-inf')))
+    
+    return result
+
+
+def apply_temperature(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    if temperature > 0.0:
+        logits = logits / temperature
+    return logits
 
 def sample(
     logits: torch.Tensor, temperature: float = 1.0, top_k: Optional[int] = None, top_p: float = 1.0
 ) -> torch.Tensor:
     if top_p < 0.0 or top_p > 1.0:
         raise ValueError(f"top_p must be in [0, 1], got {top_p}")
-    logits = logits[0, -1]
-    # optionally crop the logits to only the top k options
-    if top_k is not None:
-        v, i = torch.topk(logits, min(top_k, logits.size(-1)))
-        # do not use `torch.where` as in nanogpt because it will repeat top-k collisions
-        logits = torch.full_like(logits, float("-inf")).scatter_(-1, i, v)
-    # optionally scale the logits and sample from a probability distribution
-    if temperature > 0.0 or top_p > 0.0:
-        if temperature > 0.0:
-            logits = logits / temperature
-        # optionally crop the logits to smallest set of logits with a cumulative probability above top_p
-        if top_p < 1.0:
-            logits = sample_top_p(logits, top_p)
-        probs = torch.nn.functional.softmax(logits, dim=-1)
-        return multinomial_num_samples_1(probs)
-    return torch.argmax(logits, dim=-1, keepdim=True)
+    #logits = logits[0, -1]
 
+    logits = apply_temperature(logits,temperature)
+
+    # optionally crop the logits to only the top k options
+    logits = crop_top_k(logits,top_k)
+
+    # optionally crop the logits to smallest set of logits with a cumulative probability above top_p
+    logits = crop_top_p(logits, top_p)
+
+
+    if top_k > 0 or top_p > 0.0:
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+        next_token = multinomial_num_samples_1(probs)
+    else:
+        # argmax / greedy
+        next_token =  torch.argmax(logits, dim=-1, keepdim=True)
+
+    return next_token
+
+
+def sample_adaptive(
+    logits: torch.Tensor, temperature: float = 1.0, top_k: Optional[int] = None, top_p: float = 1.0
+) -> Tuple[torch.Tensor, float, float]: # token, entropy, var_entropy
+    if top_p < 0.0 or top_p > 1.0:
+        raise ValueError(f"top_p must be in [0, 1], got {top_p}")
+    #logits = logits[0, -1]
+
+
+    # logits = apply_temperature(logits,temperature)
+
+    # # optionally crop the logits to only the top k options
+    # logits = crop_top_k(logits,top_k)
+
+    # # optionally crop the logits to smallest set of logits with a cumulative probability above top_p
+    # logits = crop_top_p(logits, top_p)
+
+    if top_k > 0 or top_p > 0.0:
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+        next_token = multinomial_num_samples_1(probs)
+    else:
+        # argmax / greedy
+        next_token =  torch.argmax(logits, dim=-1, keepdim=True)
+
+    entropy = calculate_entropy(logits).item()
+    varentropy = calculate_varentropy(logits).item()
+
+    return next_token, entropy, varentropy
+
+
+def sample_greedy(
+    logits: torch.Tensor, temperature: float = 1.0, top_k: Optional[int] = None, top_p: float = 1.0
+) -> Tuple[torch.Tensor, float, float]: # token, entropy, var_entropy
+    if top_p < 0.0 or top_p > 1.0:
+        raise ValueError(f"top_p must be in [0, 1], got {top_p}")
+    #logits = logits[0, -1]
+
+    next_token =  torch.argmax(logits, dim=-1, keepdim=True)
+
+    entropy = calculate_entropy(logits).item()
+    varentropy = calculate_varentropy(logits).item()
+
+    return next_token, entropy, varentropy
+
+
+def calculate_varentropy(logits: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate the varentropy (variance of entropy) of the given logits.
+
+    Args:
+    logits (torch.Tensor): Tensor of shape [batch_size, vocab_size]
+
+    Returns:
+    torch.Tensor: Varentropy values of shape [batch_size]
+    """
+    # Add small epsilon to avoid log(0)
+    eps = 1e-10
+
+    # Compute softmax with better numerical stability
+    max_logits = torch.max(logits, dim=-1, keepdim=True)[0]
+    logits_exp = torch.exp(logits - max_logits)
+    probs = logits_exp / torch.sum(logits_exp, dim=-1, keepdim=True)
+
+    # Compute log probabilities
+    log_probs = torch.log(probs + eps)
+
+    # Calculate entropy
+    entropy = -torch.sum(probs * log_probs, dim=-1, keepdim=True)
+
+    # Calculate varentropy
+    varentropy = torch.sum(probs * (log_probs + entropy) ** 2, dim=-1)
+
+    # Check for invalid values
+    varentropy = torch.where(torch.isnan(varentropy), torch.zeros_like(varentropy), varentropy)
+
+    # print("ve: ", varentropy)
+    return varentropy
+
+
+def calculate_entropy(logits: torch.Tensor) -> torch.Tensor:
+
+    """
+    Calculate the entropy of the given logits.
+
+    Args:
+    logits (torch.Tensor): Tensor of shape [batch_size, vocab_size]
+
+    Returns:
+    torch.Tensor: Entropy values of shape [batch_size]
+    """
+    # Add small epsilon to avoid log(0)
+    eps = 1e-10
+
+    # Compute softmax with better numerical stability
+    max_logits = torch.max(logits, dim=-1, keepdim=True)[0]
+    logits_exp = torch.exp(logits - max_logits)
+    probs = logits_exp / torch.sum(logits_exp, dim=-1, keepdim=True)
+
+    # Compute log probabilities
+    log_probs = torch.log(probs + eps)
+
+    # Calculate entropy
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+
+    # Check for invalid values
+    entropy = torch.where(torch.isnan(entropy), torch.zeros_like(entropy), entropy)
+    # print("e: ", entropy)
+    return entropy
+
+
+def apply_precision_limit(logits, vocab_size=128256)  -> torch.Tensor:
+    # Constants
+    u = 2**(-7)  # bfloat16 relative error
+    min_logprob = math.log(u) - math.log(vocab_size) / 2
+    
+    # Convert min_logprob to the appropriate device and dtype
+    min_logprob_tensor = torch.tensor(min_logprob, device=logits.device, dtype=logits.dtype)
+    
+    # Create a mask for logits below the threshold
+    mask = logits < min_logprob_tensor
+    
+    # Set values below threshold to -inf
+    logits[mask] = float('-inf')
+    
+    return logits
+
+
+def scale_attn_entropy(logits,entropies,entropy_threshold,scale_factor)  -> torch.Tensor:
+
+    ##### MORE CLAUDE 
+    # entropy_threshold = 8.05
+
+    # Calculate average entropy per head
+    all_entropies = torch.stack(entropies)
+    avg_entropy_per_head = all_entropies.mean(dim=(0, 1))  # Shape: (num_heads,)
+
+
+    # scale based on attention head entropy
+    # scale_factor = .25
+
+    # Create a scaling factor for each head
+    # Heads with entropy below the threshold will be scaled up, others scaled down
+    head_scale = torch.where(avg_entropy_per_head >= entropy_threshold,
+                             1 + scale_factor,
+                             1 - scale_factor)
+    
+    # Ensure the scaling factor is positive
+    head_scale = torch.clamp(head_scale, min=0.1)
+    
+    # Reshape logits to separate the head dimension
+    B, T, V = logits.shape
+    H = len(avg_entropy_per_head)
+    logits_per_head = logits.view(B, T, H, V // H)
+
+    # Apply the scaling to the logits
+    scaled_logits = logits_per_head * head_scale.view(1, 1, H, 1)
+    
+    # Reshape back to original logits shape
+    logits = scaled_logits.view(B, T, V)
+
+    return logits
+
+
+def crop_attn_entropy(logits,entropies,entropy_threshold) -> torch.Tensor:
+
+    avg_entropy = torch.mean(torch.stack(entropies)).item()
+
+    # Stack entropies and varentropies from all layers
+    all_entropies = torch.stack(entropies)  # Shape: (num_layers, batch_size, num_heads)
+
+    # Calculate average entropy per head
+    all_entropies = torch.stack(entropies)
+    avg_entropy_per_head = all_entropies.mean(dim=(0, 1))  # Shape: (num_heads,)
+    
+    # Create a mask for heads with entropy below the threshold
+    head_mask = (avg_entropy_per_head <= entropy_threshold).float()
+    
+    # Reshape logits to separate the head dimension
+    B, T, V = logits.shape
+    H = len(avg_entropy_per_head)
+    logits_per_head = logits.view(B, T, H, V // H)
+    
+    # Apply the mask to the logits
+    masked_logits = logits_per_head * head_mask.view(1, 1, H, 1)
+    
+    # Reshape back to original logits shape
+    logits = masked_logits.view(B, T, V)
+
+    return logits
 
 def next_token(model: GPT, input_pos: torch.Tensor, x: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-    logits = model(x, input_pos)
-    _next = sample(logits, **kwargs).to(dtype=torch.int64)
-    return _next
+    logits, entropies, varentropies = model(x, input_pos)
+
+    avg_entropy = torch.mean(torch.stack(entropies)).item()
+    avg_varentropy = torch.mean(torch.stack(varentropies)).item()
+
+    log("--")
+    # log(str(avg_entropy) + " - " + str(avg_varentropy) )
+
+    log(f"Average Entropy: {avg_entropy:.4f}, Average Varentropy: {avg_varentropy:.4f}")
+    
+    # # Per-head analysis
+    # num_heads = avg_entropy_per_head.size(0)
+    # for head in range(num_heads):
+    #     log(f"Head {head}: Entropy = {avg_entropy_per_head[head].item():.4f}, "
+    #         f"Varentropy = {avg_varentropy_per_head[head].item():.4f}")
+    ## end claude 
+
+    entropy_all = calculate_entropy(logits[0, -1]).item()
+    varentropy_all = calculate_varentropy(logits[0, -1]).item()
+    log("ALL: " + str(entropy_all) + " " + str(varentropy_all))
+    
+
+    #logits = crop_attn_entropy(logits,entropies,8.35)
+    logits = scale_attn_entropy(logits,entropies,8.2,0.6)
+    log("SCALED: " + str(calculate_entropy(logits[0, -1]).item()) + " " + str(calculate_varentropy(logits[0, -1]).item()) )
+
+    logits = logits[0, -1] # moved this out of sampler
+
+    # entropy across all logits
+    entropy_all = calculate_entropy(logits).item()
+    varentropy_all = calculate_varentropy(logits).item()
+
+    logits = keep_highest_logits(logits,2)
+    log("PEAKS: " + str(calculate_entropy(logits).item()) + " " + str(calculate_varentropy(logits).item()))
+
+    if calculate_entropy(logits).item() > 1:
+        logits = apply_temperature(logits,.1)
+    else:
+        logits = apply_temperature(logits,.6)
+    log("TEMP: " + str(calculate_entropy(logits).item()) + " " + str(calculate_varentropy(logits).item()))
+
+    # logits = crop_min_p(logits,0.002)
+    # log("MIN_P: " + str(calculate_entropy(logits).item()) + " " + str(calculate_varentropy(logits).item()))
+
+    # # optionally crop the logits to only the top k options
+    # logits = crop_top_k(logits,50)
+    # log("TOP_K: " + str(calculate_entropy(logits).item()) + " " + str(calculate_varentropy(logits).item()))
+
+    # optionally crop the logits to smallest set of logits with a cumulative probability above top_p
+    # logits = crop_top_p(logits, 0.8)
+    # log("TOP_P: " + str(calculate_entropy(logits).item()) + " " + str(calculate_varentropy(logits).item()))
+
+
+
+    if entropy_all < 0.1 and varentropy_all < 2 :
+       _next, entropy, varentropy = sample_greedy(logits, **kwargs)
+    else:
+        _next, entropy, varentropy = sample_adaptive(logits, **kwargs)
+
+    # log(str(entropy_all) + " " + str(varentropy_all) )
+    # log(str(entropy) + " " + str(varentropy) )
+
+    return _next.to(dtype=torch.int64)
 
 def batched_sample(logits: list[torch.Tensor], kwargs: list[dict]) -> torch.Tensor:
     assert len(logits) == len(kwargs), "logits and kwargs must have the same length."

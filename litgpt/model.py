@@ -95,13 +95,17 @@ class GPT(nn.Module):
         if self.config.scale_embeddings:
             x = x * torch.tensor(self.config.n_embd**0.5, dtype=x.dtype)
 
+        entropies = []
+        varentropies = []
         for block in self.transformer.h:
             x = block(x, cos, sin, mask, input_pos)
+            entropies.append(block.attn.last_attention_entropy)
+            varentropies.append(block.attn.last_attention_varentropy)
         x = self.transformer.ln_f(x)
         x = self.lm_head(x)  # (b, t, vocab_size)
         if self.config.final_logit_softcapping is not None:
             x = torch.tanh(x / self.config.final_logit_softcapping) * self.config.final_logit_softcapping
-        return x
+        return x, entropies, varentropies
 
     @classmethod
     def from_name(cls, name: str, **kwargs: Any) -> Self:
@@ -173,7 +177,6 @@ class GPT(nn.Module):
         self.mask_cache = None
         for block in self.transformer.h:
             block.attn.kv_cache = None
-
 
 class Block(nn.Module):
     def __init__(self, config: Config, block_idx: int) -> None:
@@ -324,6 +327,7 @@ class CausalSelfAttention(nn.Module):
         # output projection
         return self.proj(y)
 
+
     def scaled_dot_product_attention(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
@@ -340,13 +344,61 @@ class CausalSelfAttention(nn.Module):
                 mask = torch.ones(q.size(2), q.size(2), dtype=q.dtype, device=q.device).triu(diagonal=1)
                 mask.masked_fill_(mask.bool(), torch.finfo(q.dtype).min)
             scores = scores + mask
-            scores = torch.nn.functional.softmax(scores, dim=-1, dtype=torch.float).to(dtype=q.dtype)
-            y = scores @ v
+            attention_probs = torch.nn.functional.softmax(scores, dim=-1, dtype=torch.float).to(dtype=q.dtype)
+
+            
+            y = attention_probs @ v
         else:
             y = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=mask, dropout_p=0.0, scale=scale, is_causal=mask is None
             )
+            
+            # For SDPA, we need to recalculate the attention probabilities
+            attention_probs = torch.matmul(q, k.transpose(-2, -1)) * scale
+            if mask is not None:
+                attention_probs = attention_probs + mask
+            attention_probs = torch.nn.functional.softmax(attention_probs, dim=-1)
+            
+        # Calculate attention entropy and varentropy
+        attention_entropy = self.calculate_entropy(attention_probs)
+        attention_varentropy = self.calculate_varentropy(attention_probs)
+        
+        # Store the calculated values as attributes of the module
+        self.last_attention_entropy = attention_entropy
+        self.last_attention_varentropy = attention_varentropy
+
         return y.transpose(1, 2)
+
+
+    def calculate_entropy(self, probs: torch.Tensor) -> torch.Tensor:
+        # Assuming probs has shape (batch_size, num_heads, seq_len, seq_len)
+        # Calculate entropy for each head separately
+        entropy = -torch.sum(probs * torch.log(probs + 1e-9), dim=(-2, -1))
+        return entropy  # Shape: (batch_size, num_heads)
+
+    def calculate_varentropy(self, probs: torch.Tensor) -> torch.Tensor:
+        # Assuming probs has shape (batch_size, num_heads, seq_len, seq_len)
+        # Calculate varentropy for each head separately
+        entropy = self.calculate_entropy(probs)
+        varentropy = torch.sum(probs * (torch.log(probs + 1e-9) + entropy.unsqueeze(-1).unsqueeze(-1))**2, dim=(-2, -1))
+        return varentropy  # Shape: (batch_size, num_heads)
+
+
+    # def calculate_entropy(self, probs):
+    #     # Avoid log(0) by adding a small epsilon
+    #     eps = 1e-8
+    #     entropy = -torch.sum(probs * torch.log(probs + eps), dim=-1)
+    #     return entropy.mean()
+
+    # def calculate_varentropy(self, probs):
+    #     # Calculate entropy for each attention distribution
+    #     eps = 1e-8
+    #     entropies = -torch.sum(probs * torch.log(probs + eps), dim=-1)
+        
+    #     # Calculate the variance of these entropies
+    #     varentropy = torch.var(entropies)
+    #     return varentropy
+
 
     def build_kv_cache(
         self,
